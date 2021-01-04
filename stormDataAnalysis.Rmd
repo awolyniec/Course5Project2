@@ -1,0 +1,402 @@
+---
+title: A Summary of the Deadliest, Most Injurious, and Most Property/Crop-Damaging
+  Events in the NWS Storm Data, 1996-2011
+output:
+  html_document:
+    keep_md: yes
+---
+## Synopsis
+The NWS provides data on fatalities (direct and indirect), injuries (direct and indirect),
+property damage, and crop damage for weather events across the United States
+between 1950 and 2011 (called Storm Data). This analysis looks at only the data
+between 1996 and 2011 (only since January 1996 has the NWS recorded all of its 48
+weather events in Storm Data), and shows the most damaging weather events in terms of 3
+metrics: 1) Fatalities (direct and indirect), injuries (direct and indirect),
+and combined property and crop damage. For each individual metric, the weather events
+in the top decile are shown. Due to the inconsistent and sometimes unclear labeling of
+weather events in Storm Data, some events were discarded, and others were re-labeled.
+The reasoning behind these modifications is discussed. Issues with the underlying
+data are also discussed.
+
+## Setting global options
+```{r globalSettings}
+knitr::opts_chunk$set(message = FALSE)
+options(scipen=999)
+```
+## Downloading dependencies
+```{r downloadDependencies}
+library(dplyr)
+```
+
+## Data processing
+Storm Data was downloaded from https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2 on
+December 23rd, 2020 at 12:36 PM EST, then unzipped, and loaded into R as follows.
+```{r loadData}
+stormData <- read.csv("data/raw/repdata_data_StormData.csv")
+```
+
+Several unused columns were removed in order to reduce file size (the file goes down to 2.9 MB instead of 500+MB).
+```{r removeColumnsReduceSize}
+stormData <- subset(stormData, select = c(
+  BGN_DATE, EVTYPE, FATALITIES, INJURIES, PROPDMG,
+  PROPDMGEXP, CROPDMG, CROPDMGEXP
+))
+```
+
+Certain key text fields were set to lowercase in order to remove ambiguities.
+```{r lowerCaseTextFields}
+stormData$EVTYPE <- tolower(stormData$EVTYPE)
+stormData$PROPDMGEXP <- tolower(stormData$PROPDMGEXP)
+stormData$CROPDMGEXP <- tolower(stormData$CROPDMGEXP)
+```
+
+Since the data will be subsetted based on the year (and no other date information)
+will be used, a year field was created and the "beginning date" field was replaced.
+```{r getYear}
+stormData$YEAR <- format(as.Date(stormData$BGN_DATE, "%m/%d/%Y"), "%Y")
+stormData <- subset(stormData, select = -BGN_DATE)
+```
+
+Since total damage (property + crop) is being measured in this analysis,
+the property and crop damage columns needed to be combined. The property and crop
+damage values for each entry were converted to numeric, and then added together.
+```{r getTotalDamage}
+getValueFromMantissaAndExponent <- function(mantissa, exponent) {
+  if (exponent == "k") {
+    return(mantissa * 1000)
+  }
+  if (exponent == "m") {
+    return(mantissa * 1000000)
+  }
+  if (exponent == "b") {
+    return(mantissa * 1000000000)
+  }
+  return(mantissa)
+}
+
+stormData$PROPDMGNEW <- mapply(
+  getValueFromMantissaAndExponent,
+  stormData$PROPDMG,
+  stormData$PROPDMGEXP
+)
+stormData$CROPDMGNEW <- mapply(
+  getValueFromMantissaAndExponent,
+  stormData$CROPDMG,
+  stormData$CROPDMGEXP
+)
+
+stormData$DMG <- stormData$PROPDMGNEW + stormData$CROPDMGNEW
+stormData <- subset(stormData, select = -c(
+  PROPDMG, PROPDMGEXP, PROPDMGNEW, CROPDMG, CROPDMGEXP, CROPDMGNEW))
+```
+
+Because Storm Data only records all 48 events from 1996 onward, events from
+before 1996 were removed.
+```{r subsetTo1996On}
+stormData <- subset(stormData, YEAR >= 1996) # reduces event types from 897 to 438
+```
+
+Since the data contains 438 unique event types at this point, rather than the
+48 listed in the Storm Data documentation, all events had to be classified with
+one of the 48 Storm Data event types or else removed. First, event types
+that described a summary of a given time period (e.g. "summary of <month> <day>")
+were removed, as they did not describe a specific event type.
+```{r removeSummaryEvents}
+summaryEventNames <- stormData$EVTYPE[grepl("summary", stormData$EVTYPE)]
+stormData <- subset(stormData, !grepl("summary", stormData$EVTYPE) |
+                      grepl("^blizzard summary$", stormData$EVTYPE)) # reduces event types down to 372
+```
+
+When measuring cumulative fatalities/injuries/damage, events with zero fatalities/injuries/damage are not needed. They were removed. However,
+because an event may have a zero value for one of these columns but not for others,
+three copies of the data were made: One for fatalities, one for injuries, and one
+for damage. This way, an event with 0 fatalities but a positive number of
+injuries would be excluded from the fatality analysis but not from the injury analysis.
+```{r separateDataRemoveZeroes}
+fatalityData <- stormData
+injuryData <- stormData
+damageData <- stormData
+
+fatalityData <- subset(fatalityData, FATALITIES > 0) # down to 102 event types
+injuryData <- subset(injuryData, INJURIES > 0) # down to 100 event types
+damageData <- subset(damageData, DMG > 0) # down to 155 event types
+
+```
+
+Of the event types remaining, some of them correspond directly to a Storm Data
+event. In some cases, multiple event types found in the data could be reduced
+to a single event type (e.g. "rip currents" and "rip current"). The event groupings
+that correspond to an actual Storm Data event were computed.
+```{r eventBuckets}
+## buckets of events that will be counted together
+tornadoEvents <- c("tornado")
+flashFloodEvents <- c("flash flood", " flash flood")
+extremeColdWindChillEvents <- c("extreme cold/wind chill", "extreme cold", "extreme windchill", "hypothermia/exposure")
+tStormWindEvents <- c("thunderstorm wind", "tstm wind", "thunderstorm wind (g40)", "tstm wind (g40)", "tstm wind (g45)", "tstm wind 40", "tstm wind 45", "tstm wind (41)", " tstm wind (g45)", "tstm wind  (g45)", " tstm wind", "tstm wind g45")
+lightningEvents <- c("lightning")
+excessiveHeatEvents <- c("excessive heat", "hyperthermia/exposure", "record heat", "heat wave")
+ripCurrentEvents <- c("rip currents", "rip current")
+heavySnowEvents <- c("heavy snow", "snow squalls", "heavy snow shower")
+blizzardEvents <- c("blizzard")
+iceStormEvents <- c("ice storm")
+highWindEvents <- c("high wind", "high winds", "high wind (g40)")
+heavyRainEvents <- c("heavy rain", "torrential rainfall")
+winterStormEvents <- c("winter storm")
+floodEvents <- c("flood")
+strongWindEvents <- c("strong winds", "strong wind")
+hurricaneEvents <- c("hurricane", "hurricane/typhoon", "hurricane edouard", "typhoon")
+highSurfEvents <- c("high surf", "heavy surf/high surf", "   high surf advisory")
+coldWindChillEvents <- c("cold/wind chill", "extended cold", "cold", "cold temperature", "cold weather")
+avalancheEvents <- c("avalanche")
+tropicalStormEvents <- c("tropical storm")
+hailEvents <- c("hail", "small hail")
+coastalFloodEvents <- c("coastal flooding", "coastal flood", "coastal flooding/erosion")
+heatEvents <- c("heat")
+frostFreezeEvents <- c("frost/freeze", "freezing drizzle", "frost", "freeze", "damaging freeze", "early frost", "hard freeze", "agricultural freeze")
+wildfireEvents <- c("wildfire", "wild/forest fire", "brush fire")
+dustStormEvents <- c("dust storm")
+stormSurgeTideEvents <- c("storm surge/tide", "storm surge")
+waterspoutEvents <- c("waterspout")
+denseFogEvents <- c("dense fog")
+dustDevilEvents <- c("dust devil")
+marineTStormWindEvents <- c("marine thunderstorm wind", "marine tstm wind")
+marineStrongWindEvents <- c("marine strong wind")
+marineHighWindEvents <- c("marine high wind")
+tsunamiEvents <- c("tsunami")
+funnelCloudEvents <- c("funnel cloud")
+winterWeatherEvents <- c("winter weather mix")
+droughtEvents <- c("drought")
+lakeEffectSnowEvents <- c("lake effect snow")
+seicheEvents <- c("seiche")
+volcanicAshEvents <- c("volcanic ash")
+tropicalDepressionEvents <- c("tropical depression")
+lakeEffectSnowEvents <- c("lake-effect snow")
+lakeshoreFloodEvents <- c("lakeshore flood")
+astronomicalLowTideEvents <- c("astronomical low tide")
+denseSmokeEvents <- c("dense smoke")
+marineHailEvents <- c("marine hail")
+freezingFogEvents <- c("freezing fog")
+
+eventBuckets <- list(
+  tornadoEvents,
+  flashFloodEvents,
+  extremeColdWindChillEvents,
+  tStormWindEvents,
+  lightningEvents,
+  excessiveHeatEvents,
+  ripCurrentEvents,
+  heavySnowEvents,
+  blizzardEvents,
+  iceStormEvents,
+  highWindEvents,
+  heavyRainEvents,
+  winterStormEvents,
+  floodEvents,
+  strongWindEvents,
+  hurricaneEvents,
+  highSurfEvents,
+  coldWindChillEvents,
+  avalancheEvents,
+  tropicalStormEvents,
+  hailEvents,
+  coastalFloodEvents,
+  heatEvents,
+  frostFreezeEvents,
+  wildfireEvents,
+  dustStormEvents,
+  stormSurgeTideEvents,
+  waterspoutEvents,
+  denseFogEvents,
+  dustDevilEvents,
+  marineTStormWindEvents,
+  marineStrongWindEvents,
+  marineHighWindEvents,
+  tsunamiEvents,
+  funnelCloudEvents,
+  winterWeatherEvents,
+  droughtEvents,
+  lakeEffectSnowEvents,
+  seicheEvents,
+  volcanicAshEvents,
+  tropicalDepressionEvents,
+  lakeEffectSnowEvents,
+  lakeshoreFloodEvents,
+  astronomicalLowTideEvents,
+  denseSmokeEvents,
+  marineHailEvents,
+  freezingFogEvents
+)
+```
+
+Any event whose event type did not belong in one of the above groupings was determined
+not to be a Storm Data event, and removed.
+```{r removeUnnecessaryEvents}
+allEventsToKeep <- c(
+  tornadoEvents,
+  flashFloodEvents,
+  extremeColdWindChillEvents,
+  tStormWindEvents,
+  lightningEvents,
+  excessiveHeatEvents,
+  ripCurrentEvents,
+  heavySnowEvents,
+  blizzardEvents,
+  iceStormEvents,
+  highWindEvents,
+  heavyRainEvents,
+  winterStormEvents,
+  floodEvents,
+  strongWindEvents,
+  hurricaneEvents,
+  highSurfEvents,
+  coldWindChillEvents,
+  avalancheEvents,
+  tropicalStormEvents,
+  hailEvents,
+  coastalFloodEvents,
+  heatEvents,
+  frostFreezeEvents,
+  wildfireEvents,
+  dustStormEvents,
+  stormSurgeTideEvents,
+  waterspoutEvents,
+  denseFogEvents,
+  dustDevilEvents,
+  marineTStormWindEvents,
+  marineStrongWindEvents,
+  marineHighWindEvents,
+  tsunamiEvents,
+  funnelCloudEvents,
+  winterWeatherEvents,
+  droughtEvents,
+  lakeEffectSnowEvents,
+  seicheEvents,
+  volcanicAshEvents,
+  tropicalDepressionEvents,
+  lakeEffectSnowEvents,
+  lakeshoreFloodEvents,
+  astronomicalLowTideEvents,
+  denseSmokeEvents,
+  marineHailEvents,
+  freezingFogEvents
+)
+
+## remove events we're not using
+fatalityData <- subset(fatalityData, EVTYPE %in% allEventsToKeep)
+injuryData <- subset(injuryData, EVTYPE %in% allEventsToKeep)
+damageData <- subset(damageData, EVTYPE %in% allEventsToKeep)
+```
+
+All events remaining in the data were re-labeled with the name of the first event type
+in their group.
+```{r reLabelEvents}
+getNewEventLabels <- function(data) {
+  return(mapply(
+    function(eventType) {
+      for (eventBucket in eventBuckets) {
+        if (eventType %in% eventBucket) {
+          return(eventBucket[[1]])
+        }
+      }
+      return(eventType)
+    },
+    data$EVTYPE
+  ))
+}
+
+fatalityData$EVTYPE <- getNewEventLabels(fatalityData)
+injuryData$EVTYPE <- getNewEventLabels(injuryData)
+damageData$EVTYPE <- getNewEventLabels(damageData)
+```
+
+The cumulative fatality/injury/damage totals were calculated for each
+event type, and the events with top-10% values for each of the metrics
+were selected.
+```{r getYearlyCumulatives}
+fatalitiesByEvent <- fatalityData %>%
+  group_by(EVTYPE) %>%
+  summarize(CUMULATIVEFATALITIES = sum(FATALITIES))
+fatalitiesByEvent <- subset(fatalitiesByEvent, 
+                            fatalitiesByEvent$CUMULATIVEFATALITIES >= quantile(fatalitiesByEvent$CUMULATIVEFATALITIES, c(0.9))[[1]]
+)
+fatalitiesByEvent <- fatalitiesByEvent[order(fatalitiesByEvent$CUMULATIVEFATALITIES, decreasing = TRUE),]
+
+injuriesByEvent <- injuryData %>%
+  group_by(EVTYPE) %>%
+  summarize(CUMULATIVEINJURIES = sum(INJURIES))
+injuriesByEvent <- subset(injuriesByEvent, 
+                          injuriesByEvent$CUMULATIVEINJURIES >= quantile(injuriesByEvent$CUMULATIVEINJURIES, c(0.9))[[1]]
+)
+injuriesByEvent <- injuriesByEvent[order(injuriesByEvent$CUMULATIVEINJURIES, decreasing = TRUE),]
+
+damageByEvent <- damageData %>%
+  group_by(EVTYPE) %>%
+  summarize(CUMULATIVEDMG = sum(DMG))
+damageByEvent <- subset(damageByEvent, 
+                        damageByEvent$CUMULATIVEDMG >= quantile(damageByEvent$CUMULATIVEDMG, c(0.9))[[1]]
+)
+damageByEvent <- damageByEvent[order(damageByEvent$CUMULATIVEDMG, decreasing = TRUE),]
+```
+
+## Results
+To shed some light on what types of weather events harm population health the most,
+we looked at fatalities (direct and indirect), and injuries (direct and indirect).
+To better understand what types of events cause the most economic damage,
+we looked at direct property and crop damage.
+
+```{r figure1}
+with(fatalitiesByEvent, barplot(
+  CUMULATIVEFATALITIES,
+  names.arg = EVTYPE,
+  ylim = c(0, 2000),
+  main = "Total Fatalities (Direct and Indirect) by Disaster, 1996 - 2011",
+  width = 1200
+))
+```
+
+Figure 1: Cumulative fatalities for events with top-decile cumulative fatality
+values
+
+```{r figure2}
+with(injuriesByEvent, barplot(
+  CUMULATIVEINJURIES,
+  names.arg = EVTYPE,
+  ylim = c(0, 25000),
+  main = "Total Injuries (Direct and Indirect) by Disaster, 1996 - 2011",
+  width = 1200
+))
+```
+
+Figure 2: Cumulative injuries for events with top-decile cumulative injury
+values
+
+```{r figure3}
+with(damageByEvent, barplot(
+  CUMULATIVEDMG,
+  names.arg = EVTYPE,
+  ylim = c(0, 180000000000),
+  main = "Total Property and Crop Damage ($) by Disaster, 1996 - 2011",
+  width = 1200
+))
+```
+
+Figure 3: Cumulative damage for events with top-decile cumulative damage
+values
+
+## Discussion
+#### Accuracy of data not guaranteed
+As described in the Storm Data documentation, some of the data was gathered
+from non-NWS sources, and its accuracy cannot be guaranteed. Therefore,
+the accuracy of these results cannot be guaranteed.
+
+#### Issues grouping events together
+Since the events were not properly labeled with event types, some decisions
+had to be made as to the re-labeling of event types. This may bias the
+results of the analysis. For instance, combined events (e.g. "flood/flash flood"),
+where each of the events is a separate Storm Data event, were discarded.
+"river flooding" was an event, and it was unclear whether or not this should
+fall under the "flood" event category in Storm Data, because "flood" is not
+a catch-all category in the Storm Data documentation ("flood", "flash flood",
+"lakeshore flood", and "coastal flood") were all separate categories. This might
+bias the results. Flood damage may have been underestimated, due to the separation
+into different categories.
